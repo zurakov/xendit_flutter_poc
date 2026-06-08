@@ -1,0 +1,46 @@
+# Root GitIgnore for Xendit Flutter POC
+
+# IDEs, Editors & OS Metadata
+.idea/
+.vscode/
+*.swp
+*.swo
+*.tmp
+*.bak
+*.log
+Thumbs.db
+.DS_Store
+
+# Local Environment Credentials & Configurations
+.env
+.env.*
+!.env.example
+auth.json
+*.key
+storage/*.key
+
+# Composer and Local Packages
+composer.phar
+vendor/
+node_modules/
+
+# SQLite databases & Caches
+*.sqlite
+*.sqlite-journal
+database/*.sqlite
+database/*.sqlite-journal
+.phpunit.result.cache
+.phpunit.cache/
+
+# Flutter / Dart caches & compilation outputs
+.dart_tool/
+.flutter-plugins
+.flutter-plugins-dependencies
+.pub-cache/
+.pub/
+build/
+.metadata
+/flutter_frontend/android/app/debug/
+/flutter_frontend/android/app/profile/
+/flutter_frontend/android/app/release/
+/flutter_frontend/flutter_frontend.iml
