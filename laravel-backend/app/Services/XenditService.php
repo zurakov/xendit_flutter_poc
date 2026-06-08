@@ -35,7 +35,7 @@ class XenditService
             $channelCode = $channelCode . '_VIRTUAL_ACCOUNT';
         }
 
-        $channelProperties = $this->buildChannelProperties($channelCode, $paymentMethodType);
+        $channelProperties = $this->buildChannelProperties($channelCode, $paymentMethodType, $referenceId);
 
         $response = Http::withBasicAuth(config('services.xendit.secret_key'), '')
             ->withoutVerifying()
@@ -60,7 +60,7 @@ class XenditService
         return $response->json();
     }
 
-    private function buildChannelProperties(string $channelCode, string $paymentMethodType): array
+    private function buildChannelProperties(string $channelCode, string $paymentMethodType, string $referenceId): array
     {
         $expiry = now()->addHours(24)->toIso8601String();
 
@@ -74,9 +74,9 @@ class XenditService
                 'expires_at'     => $expiry,
             ],
             'EWALLET' => [
-                'success_return_url' => config('app.url') . '/payment/success',
-                'failure_return_url' => config('app.url') . '/payment/failure',
-                'cancel_return_url'  => config('app.url') . '/payment/cancel',
+                'success_return_url' => config('app.url') . '/payment/success?reference_id=' . $referenceId,
+                'failure_return_url' => config('app.url') . '/payment/failure?reference_id=' . $referenceId,
+                'cancel_return_url'  => config('app.url') . '/payment/cancel?reference_id=' . $referenceId,
             ],
             'RETAIL' => [
                 'payer_name' => 'POC User',
@@ -86,24 +86,60 @@ class XenditService
         };
     }
 
-    public function createDisbursement(string $externalId, string $bankCode, string $accountHolder, string $accountNumber, float $amount, string $description)
-    {
+    public function createPayout(
+        string $referenceId,
+        string $channelCode,
+        string $accountHolderName,
+        string $accountNumber,
+        float $amount,
+        string $description
+    ): array {
+        // Ensure channelCode has ID_ prefix if not present (required by v3/v2 Payouts API)
+        if (!str_starts_with($channelCode, 'ID_')) {
+            $channelCode = 'ID_' . $channelCode;
+        }
+
+        // Mock fallback for sandbox/forbidden errors or mock testing account number
+        if ($accountNumber === '1234567890' || $accountNumber === '000000000099') {
+            Log::info("Mock payout account detected. Simulating successful payout.");
+            return [
+                'id' => 'po-mock-' . (string) \Illuminate\Support\Str::uuid(),
+                'reference_id' => $referenceId,
+                'status' => 'ACCEPTED',
+                'amount' => (int) $amount,
+                'channel_code' => $channelCode,
+                'channel_properties' => [
+                    'account_number' => $accountNumber,
+                    'account_holder_name' => $accountHolderName,
+                ]
+            ];
+        }
+
         $payload = [
-            'external_id' => $externalId,
-            'bank_code' => $bankCode,
-            'account_holder_name' => $accountHolder,
-            'account_number' => $accountNumber,
-            'description' => $description,
+            'reference_id' => $referenceId,
+            'channel_code' => $channelCode,
+            'channel_properties' => [
+                'account_number' => $accountNumber,
+                'account_holder_name' => $accountHolderName,
+            ],
             'amount' => (int) $amount,
+            'currency' => 'IDR',
+            'description' => $description,
         ];
 
-        Log::info('Xendit createDisbursement payload:', $payload);
+        Log::info('Xendit createPayout payload:', $payload);
 
-        $response = $this->client()->post("{$this->baseUrl}/disbursements", $payload);
+        $response = Http::withBasicAuth(config('services.xendit.secret_key'), '')
+            ->withoutVerifying()
+            ->withHeaders([
+                'Content-Type' => 'application/json',
+                'Idempotency-key' => $referenceId,
+            ])
+            ->post('https://api.xendit.co/v2/payouts', $payload);
 
-        if ($response->failed()) {
-            Log::error('Xendit createDisbursement failed:', $response->json() ?: [$response->body()]);
-            throw new \Exception($response->json()['message'] ?? 'Failed to create Disbursement from Xendit');
+        if (!$response->successful()) {
+            Log::error('Xendit createPayout failed:', $response->json() ?: [$response->body()]);
+            throw new \Exception($response->json()['message'] ?? 'Failed to create Payout from Xendit');
         }
 
         return $response->json();
@@ -135,114 +171,77 @@ class XenditService
         return $response->json();
     }
 
-    public function createCardSession(
-        string $customerName,
-        string $customerEmail,
-        string $customerPhone
-    ): array {
-        $referenceId = 'card-session-' . (string) \Illuminate\Support\Str::uuid();
-        $customerReferenceId = 'cust-' . (string) \Illuminate\Support\Str::uuid();
-
-        $response = Http::withBasicAuth(config('services.xendit.secret_key'), '')
-            ->withoutVerifying()
-            ->withHeaders([
-                'Content-Type' => 'application/json',
-            ])
-            ->post('https://api.xendit.co/sessions', [
-                'reference_id'  => $referenceId,
-                'session_type'  => 'SAVE',
-                'mode'          => 'CARDS_SESSION_JS',
-                'amount'        => 0,
-                'currency'      => 'IDR',
-                'country'       => 'ID',
-                'customer'      => [
-                    'reference_id'      => $customerReferenceId,
-                    'type'              => 'INDIVIDUAL',
-                    'email'             => $customerEmail,
-                    'mobile_number'     => $customerPhone,
-                    'individual_detail' => [
-                        'given_names' => $customerName,
-                    ],
-                ],
-                'cards_session_js' => [
-                    'success_return_url' => config('app.url') . '/payment/success',
-                    'failure_return_url' => config('app.url') . '/payment/failure',
-                ],
-            ]);
-
-        if (!$response->successful()) {
-            throw new \Exception('Xendit createCardSession failed: ' . $response->body());
-        }
-
-        return $response->json();
-    }
-
-    public function createCardPayment(
-        string $paymentTokenId,
+    public function createCardPaymentDirect(
+        string $referenceId,
         int $amount,
-        string $referenceId
+        string $description,
+        string $cardNumber,
+        string $expiryMonth,
+        string $expiryYear,
+        string $cvn,
+        string $cardholderFirstName,
+        string $cardholderLastName,
+        string $cardholderEmail,
+        string $cardholderPhone
     ): array {
-        // Mock fallback for browser / desktop testing with simulated tokens
-        if (str_starts_with($paymentTokenId, 'pt-mock-token-')) {
-            Log::info("Mock card payment token detected. Simulating successful card payment.");
+        // Mock fallback for browser / desktop testing with simulated card numbers
+        if ($cardNumber === '4000000000001091') {
+            Log::info("Mock card number detected. Simulating successful card payment requiring action.");
             return [
                 'id' => 'pr-mock-' . (string) \Illuminate\Support\Str::uuid(),
-                'status' => 'SUCCEEDED',
-                'payment_method' => [
-                    'type' => 'CARD',
-                    'card' => [
-                        'card_information' => [
-                            'masked_card_number' => '400000XXXXXX1091',
-                            'card_type' => 'DEBIT',
-                            'network' => 'VISA',
-                        ],
-                    ],
+                'status' => 'REQUIRES_ACTION',
+                'actions' => [
+                    [
+                        'type' => 'REDIRECT_CUSTOMER',
+                        'value' => config('app.url') . '/payment/success?reference_id=' . $referenceId,
+                    ]
                 ],
+                'channel_properties' => [
+                    'card_details' => [
+                        'masked_card_number' => '400000XXXXXX1091',
+                        'type' => 'DEBIT',
+                        'network' => 'VISA',
+                    ]
+                ]
             ];
         }
 
         $payload = [
-            'reference_id'      => $referenceId,
-            'type'              => 'PAY',
-            'country'           => 'ID',
-            'currency'          => 'IDR',
-            'request_amount'    => $amount,
-            'payment_token_id'  => $paymentTokenId,
+            'reference_id'   => $referenceId,
+            'type'           => 'PAY',
+            'country'        => 'ID',
+            'currency'       => 'IDR',
+            'request_amount' => $amount,
+            'capture_method' => 'AUTOMATIC',
+            'channel_code'   => 'CARDS',
             'channel_properties' => [
-                'skip_three_ds'       => false,
-                'success_return_url'  => config('app.url') . '/payment/success',
-                'failure_return_url'  => config('app.url') . '/payment/failure',
-                'card_on_file_type'   => 'CUSTOMER_UNSCHEDULED',
+                'card_details' => [
+                    'card_number' => $cardNumber,
+                    'cvn'         => $cvn,
+                    'expiry_month'=> $expiryMonth,
+                    'expiry_year' => $expiryYear,
+                    'cardholder_first_name' => $cardholderFirstName,
+                    'cardholder_last_name'  => $cardholderLastName,
+                    'cardholder_email'      => $cardholderEmail,
+                ],
+                'success_return_url'  => config('app.url') . '/payment/success?reference_id=' . $referenceId,
+                'failure_return_url'  => config('app.url') . '/payment/failure?reference_id=' . $referenceId,
             ],
+            'description' => $description,
         ];
 
-        $maxRetries = 3;
-        $attempt = 0;
+        $response = Http::withBasicAuth(config('services.xendit.secret_key'), '')
+            ->withoutVerifying()
+            ->withHeaders([
+                'api-version' => '2024-11-11',
+                'Content-Type' => 'application/json',
+            ])
+            ->post('https://api.xendit.co/v3/payment_requests', $payload);
 
-        while ($attempt < $maxRetries) {
-            $response = Http::withBasicAuth(config('services.xendit.secret_key'), '')
-                ->withoutVerifying()
-                ->withHeaders([
-                    'api-version' => '2024-11-11',
-                    'Content-Type' => 'application/json',
-                ])
-                ->post('https://api.xendit.co/v3/payment_requests', $payload);
-
-            $body = $response->json();
-
-            if ($response->successful()) {
-                return $body;
-            }
-
-            if (($body['error_code'] ?? '') === 'TOKEN_NOT_ACTIVE' && $attempt < $maxRetries - 1) {
-                $attempt++;
-                sleep(1);
-                continue;
-            }
-
-            throw new \Exception('Xendit createCardPayment failed: ' . $response->body());
+        if (!$response->successful()) {
+            throw new \Exception('Xendit createCardPaymentDirect failed: ' . $response->body());
         }
 
-        throw new \Exception('Xendit createCardPayment retries exhausted.');
+        return $response->json();
     }
 }

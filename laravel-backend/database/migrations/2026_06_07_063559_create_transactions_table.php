@@ -22,7 +22,6 @@ return new class extends Migration
             $table->string('status')->default('PENDING'); // PENDING | PAID | ACCEPTED | DISBURSED | FAILED
             $table->string('xendit_payment_id')->nullable(); // ewc_xxx, qr_xxx, va_xxx
             $table->timestamp('paid_at')->nullable();
-            $table->foreignId('payout_method_id')->nullable()->constrained('payout_methods')->onDelete('set null');
             $table->string('disbursement_external_id')->nullable()->unique();
             $table->timestamps();
         });

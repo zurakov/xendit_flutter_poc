@@ -84,12 +84,12 @@ class _PayoutMethodsScreenState extends State<PayoutMethodsScreen> {
             itemCount: provider.payoutMethods.length,
             itemBuilder: (context, index) {
               final method = provider.payoutMethods[index];
-              final int id = method['id'];
-              final String label = method['label'] ?? 'N/A';
-              final String channel = method['channel_code'] ?? 'BCA';
-              final String masked = method['masked_account'] ?? '';
-              final bool isPrimary = method['is_primary'] ?? false;
-              final String type = method['channel_type'] ?? 'BANK';
+              final String id = method.id;
+              final String label = method.label;
+              final String channel = method.channelCode;
+              final String masked = method.maskedAccount;
+              final bool isPrimary = method.isPrimary;
+              final String type = method.channelType;
 
               return Dismissible(
                 key: Key('payout_method_$id'),

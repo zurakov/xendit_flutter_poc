@@ -1,23 +1,10 @@
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
-import 'package:xendit_cards_session/xendit_cards_session.dart';
-import 'config/app_config.dart';
 import 'providers/payment_provider.dart';
 import 'screens/home_screen.dart';
 
-import 'package:flutter/foundation.dart';
-import 'dart:io' show Platform;
-
-final xenditCardsSession = XenditCardsSession();
-
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
-  final isPlaceholderKey = AppConfig.xenditPublicKey == 'xnd_public_development_YOUR_PUBLIC_KEY' || AppConfig.xenditPublicKey.isEmpty;
-  if (!kIsWeb && (Platform.isAndroid || Platform.isIOS) && !isPlaceholderKey) {
-    await xenditCardsSession.initialize(
-      apiKey: AppConfig.xenditPublicKey,
-    );
-  }
   runApp(
     ChangeNotifierProvider(
       create: (_) => PaymentProvider(),

@@ -4,19 +4,15 @@ use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Route;
 
 use App\Http\Controllers\PaymentChannelController;
-use App\Http\Controllers\PayoutMethodController;
 use App\Http\Controllers\TransactionController;
 use App\Http\Controllers\WebhookController;
-use App\Http\Controllers\CardSessionController;
+use App\Http\Controllers\CardChargeController;
 
 // Payment Channels
 Route::get('/payment-channels', [PaymentChannelController::class, 'index']);
 
-// Card Session Creation
-Route::post('/card/session', [CardSessionController::class, 'create']);
-
-// Payout Methods
-Route::apiResource('payout-methods', PayoutMethodController::class)->only(['index', 'store', 'destroy']);
+// Card Direct Charge
+Route::post('/card/charge', [CardChargeController::class, 'charge']);
 
 // Transactions
 Route::get('/transactions', [TransactionController::class, 'index']);

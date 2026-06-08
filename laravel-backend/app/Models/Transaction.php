@@ -16,7 +16,6 @@ class Transaction extends Model
         'status',
         'xendit_payment_id',
         'paid_at',
-        'payout_method_id',
         'disbursement_external_id',
     ];
 
@@ -25,12 +24,4 @@ class Transaction extends Model
         'paid_at' => 'datetime',
         'amount' => 'double',
     ];
-
-    /**
-     * Get the payout method associated with this transaction.
-     */
-    public function payoutMethod()
-    {
-        return $this->belongsTo(PayoutMethod::class);
-    }
 }

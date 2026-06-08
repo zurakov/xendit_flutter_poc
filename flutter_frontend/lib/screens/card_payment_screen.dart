@@ -1,11 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
-import 'package:flutter/foundation.dart';
-import 'dart:io' show Platform;
-import 'package:xendit_cards_session/xendit_cards_session.dart';
-import '../../main.dart'; // import global xenditCardsSession
-import '../config/app_config.dart';
 import '../providers/payment_provider.dart';
 import 'three_ds_screen.dart';
 import 'transaction_detail_screen.dart';
@@ -26,7 +21,6 @@ class CardPaymentScreen extends StatefulWidget {
 
 class _CardPaymentScreenState extends State<CardPaymentScreen> {
   final _formKey = GlobalKey<FormState>();
-
   final _cardNumberController = TextEditingController();
   final _expiryController = TextEditingController();
   final _cvvController = TextEditingController();
@@ -56,27 +50,23 @@ class _CardPaymentScreenState extends State<CardPaymentScreen> {
   }
 
   void _onCardNumberChanged() {
-    final cleanNumber = _cardNumberController.text.replaceAll(' ', '');
-    final brand = _detectCardBrand(cleanNumber);
-    if (brand != _cardBrand) {
-      setState(() {
-        _cardBrand = brand;
-      });
-    }
+    final brand = _detectCardBrand(_cardNumberController.text.replaceAll(' ', ''));
+    if (brand != _cardBrand) setState(() => _cardBrand = brand);
   }
 
   String _detectCardBrand(String number) {
     if (number.isEmpty) return '';
     if (number.startsWith('4')) return 'VISA';
-    if (number.startsWith('35')) return 'JCB';
-    
+    if (number.startsWith('34') || number.startsWith('37')) return 'AMEX';
+    if (number.startsWith('35') || number.startsWith('3337')) return 'JCB';
+    if (number.startsWith('18898')) return 'BCA';
     if (number.length >= 2) {
-      final prefix2 = int.tryParse(number.substring(0, 2)) ?? 0;
-      if (prefix2 >= 51 && prefix2 <= 55) return 'MASTERCARD';
+      final p2 = int.tryParse(number.substring(0, 2)) ?? 0;
+      if (p2 >= 51 && p2 <= 55) return 'MASTERCARD';
     }
     if (number.length >= 4) {
-      final prefix4 = int.tryParse(number.substring(0, 4)) ?? 0;
-      if (prefix4 >= 2221 && prefix4 <= 2720) return 'MASTERCARD';
+      final p4 = int.tryParse(number.substring(0, 4)) ?? 0;
+      if (p4 >= 2221 && p4 <= 2720) return 'MASTERCARD';
     }
     return '';
   }
@@ -89,9 +79,7 @@ class _CardPaymentScreenState extends State<CardPaymentScreen> {
       int n = int.tryParse(cardNumber[i]) ?? 0;
       if (alternate) {
         n *= 2;
-        if (n > 9) {
-          n = (n % 10) + 1;
-        }
+        if (n > 9) n = (n % 10) + 1;
       }
       sum += n;
       alternate = !alternate;
@@ -99,114 +87,107 @@ class _CardPaymentScreenState extends State<CardPaymentScreen> {
     return sum % 10 == 0;
   }
 
-  Future<void> _handle3DS(String actionUrl) async {
+  Future<bool> _handle3DS(String actionUrl) async {
     final result = await Navigator.push<bool>(
       context,
-      MaterialPageRoute(
-        builder: (_) => ThreeDSScreen(url: actionUrl),
-      ),
+      MaterialPageRoute(builder: (_) => ThreeDSScreen(url: actionUrl)),
     );
-    if (result != true) {
-      throw Exception('Payment Cancelled by User');
-    }
+    return result == true;
   }
 
   void _executePayment() async {
     if (!_formKey.currentState!.validate()) return;
-
     setState(() => _isProcessing = true);
 
     try {
       final provider = context.read<PaymentProvider>();
-
-      // Step 1: Create tokenization session via backend (SAVE session, amount=0)
-      final session = await provider.createCardSession(
-        customerName: _nameController.text.trim(),
-        customerEmail: _emailController.text.trim(),
-        customerPhone: _phoneController.text.trim(),
-      );
-
-      final sessionId = session['payment_session_id'];
 
       // Parse expiry
       final expiryParts = _expiryController.text.split('/');
       final expiryMonth = expiryParts[0].trim();
       final expiryYear = '20${expiryParts[1].trim()}';
 
-      // Parse first / last name
-      final name = _nameController.text.trim();
-      final nameParts = name.split(' ');
+      // Parse name
+      final nameParts = _nameController.text.trim().split(' ');
       final firstName = nameParts.first;
       final lastName = nameParts.length > 1 ? nameParts.sublist(1).join(' ') : firstName;
 
-      // Step 2: Tokenize card data against the session client-side
-      final CardResponse tokenResponse;
-      final isPlaceholderKey = AppConfig.xenditPublicKey == 'xnd_public_development_YOUR_PUBLIC_KEY' || AppConfig.xenditPublicKey.isEmpty;
-      if (!kIsWeb && (Platform.isAndroid || Platform.isIOS) && !isPlaceholderKey) {
-        tokenResponse = await xenditCardsSession.collectCardData(
-          cardNumber: _cardNumberController.text.replaceAll(' ', ''),
-          expiryMonth: expiryMonth,
-          expiryYear: expiryYear,
-          cvn: _cvvController.text.trim(),
-          cardholderFirstName: firstName,
-          cardholderLastName: lastName,
-          cardholderEmail: _emailController.text.trim(),
-          cardholderPhoneNumber: _phoneController.text.trim(),
-          paymentSessionId: sessionId,
-        );
-      } else {
-        // Mock tokenization for Web and Desktop testing
-        await Future.delayed(const Duration(seconds: 1));
-        
-        final cardNumber = _cardNumberController.text.replaceAll(' ', '');
-        String? actionUrl;
-        if (cardNumber == '4000000000001091') {
-          // Point mock 3DS redirect to the backend's success endpoint to auto-complete
-          actionUrl = '${AppConfig.baseUrl.replaceAll('/api', '')}/payment/success';
-        }
-        
-        tokenResponse = CardResponse(
-          paymentTokenId: 'pt-mock-token-' + DateTime.now().millisecondsSinceEpoch.toString(),
-          actionUrl: actionUrl,
-          message: 'Mock Success Tokenization',
-        );
-      }
-
-      // Step 2b: Handle 3DS if actionUrl is present
-      if (tokenResponse.actionUrl != null && tokenResponse.actionUrl!.isNotEmpty) {
-        await _handle3DS(tokenResponse.actionUrl!);
-      }
-
-      // Step 3: Charge the card token via backend
-      final transaction = await provider.createTransaction(
-        widget.amount,
-        widget.description,
-        'CARD',
-        'CARDS',
-        paymentTokenId: tokenResponse.paymentTokenId,
+      // Step 1: Send card details to backend — backend calls Xendit v3 payment_request
+      final result = await provider.chargeCard(
+        amount: widget.amount,
+        description: widget.description,
+        cardNumber: _cardNumberController.text.replaceAll(' ', ''),
+        expiryMonth: expiryMonth,
+        expiryYear: expiryYear,
+        cvn: _cvvController.text.trim(),
+        cardholderFirstName: firstName,
+        cardholderLastName: lastName,
+        cardholderEmail: _emailController.text.trim(),
+        cardholderPhone: _phoneController.text.trim(),
       );
+
+      // Step 2: Check if payment failed directly (e.g. decline without 3DS)
+      if (result['status'] == 'FAILED') {
+        final details = result['payment_details'] is Map 
+            ? Map<String, dynamic>.from(result['payment_details']) 
+            : {};
+        final failureReason = details['failure_reason'] ?? 'Payment was declined by the card issuer.';
+        throw Exception(failureReason);
+      }
+
+      // Step 3: If 3DS is required, the backend returns { requires_action: true, action_url: "..." }
+      final requiresAction = result['requires_action'] == true;
+      final actionUrl = result['action_url'] as String?;
+
+      if (requiresAction && actionUrl != null && actionUrl.isNotEmpty) {
+        final completed = await _handle3DS(actionUrl);
+        final transactionId = result['id'];
+
+        if (transactionId != null) {
+          // Add a short delay to allow the server-side redirect callback to complete database updates
+          await Future.delayed(const Duration(milliseconds: 500));
+          final updated = await provider.fetchSingleTransactionUpdate(transactionId as int);
+          
+          if (updated['status'] == 'PAID') {
+            if (!mounted) return;
+            Navigator.pushReplacement(
+              context,
+              MaterialPageRoute(
+                builder: (_) => TransactionDetailScreen(transactionId: updated['id']),
+              ),
+            );
+            return;
+          }
+          
+          if (updated['status'] == 'FAILED') {
+            final details = updated['payment_details'] is Map 
+                ? Map<String, dynamic>.from(updated['payment_details']) 
+                : {};
+            final failureReason = details['failure_reason'] ?? 'Payment was declined by the card issuer.';
+            throw Exception(failureReason);
+          }
+        }
+
+        if (!completed) {
+          throw Exception('3DS authentication was cancelled.');
+        }
+      }
 
       if (!mounted) return;
 
-      // Navigate to detail screen
+      // Step 3: Navigate to transaction detail
       Navigator.pushReplacement(
         context,
         MaterialPageRoute(
-          builder: (_) => TransactionDetailScreen(transactionId: transaction['id']),
+          builder: (_) => TransactionDetailScreen(transactionId: result['id']),
         ),
       );
     } catch (e) {
       if (!mounted) return;
       setState(() => _isProcessing = false);
-
-      String errMsg = e.toString().replaceAll('Exception: ', '');
-      if (errMsg.contains('TOKEN_NOT_ACTIVE')) {
-        errMsg = 'Card tokenization is still processing. Please try again.';
-      }
-
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
-          content: Text(errMsg),
+          content: Text(e.toString().replaceAll('Exception: ', '')),
           backgroundColor: const Color(0xFFF87171),
           behavior: SnackBarBehavior.floating,
         ),
@@ -217,7 +198,7 @@ class _CardPaymentScreenState extends State<CardPaymentScreen> {
   String _formatCurrency(double amount) {
     return 'Rp ${amount.toStringAsFixed(0).replaceAllMapped(
           RegExp(r'(\d{1,3})(?=(\d{3})+(?!\d))'),
-          (Match m) => '${m[1]}.',
+          (m) => '${m[1]}.',
         )}';
   }
 
@@ -242,35 +223,29 @@ class _CardPaymentScreenState extends State<CardPaymentScreen> {
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.stretch,
               children: [
-                // Live Card Preview
                 _buildLiveCardPreview(),
                 const SizedBox(height: 28),
-
-                // Card Number Input
                 TextFormField(
                   controller: _cardNumberController,
                   keyboardType: TextInputType.number,
                   inputFormatters: [
                     FilteringTextInputFormatter.digitsOnly,
                     LengthLimitingTextInputFormatter(16),
-                    CardNumberInputFormatter(),
+                    _CardNumberFormatter(),
                   ],
                   style: const TextStyle(color: Colors.white),
-                  decoration: _inputDecoration('Card Number',
-                      suffixIcon: _buildCardBrandIcon()),
+                  decoration: _inputDecoration('Card Number', suffixIcon: _buildBrandIcon()),
                   validator: (val) {
                     if (val == null || val.trim().isEmpty) return 'Please enter card number';
-                    final cleanNum = val.replaceAll(' ', '');
-                    if (cleanNum.length < 13) return 'Card number is too short';
-                    if (!_isValidLuhn(cleanNum)) return 'Invalid card number (Luhn check failed)';
+                    final clean = val.replaceAll(' ', '');
+                    if (clean.length < 13) return 'Card number too short';
+                    if (!_isValidLuhn(clean)) return 'Invalid card number';
                     return null;
                   },
                 ),
                 const SizedBox(height: 18),
-
                 Row(
                   children: [
-                    // Expiry Input
                     Expanded(
                       flex: 3,
                       child: TextFormField(
@@ -279,33 +254,29 @@ class _CardPaymentScreenState extends State<CardPaymentScreen> {
                         inputFormatters: [
                           FilteringTextInputFormatter.digitsOnly,
                           LengthLimitingTextInputFormatter(4),
-                          CardMonthInputFormatter(),
+                          _ExpiryFormatter(),
                         ],
                         style: const TextStyle(color: Colors.white),
-                        decoration: _inputDecoration('Expiry Date (MM/YY)'),
+                        decoration: _inputDecoration('Expiry (MM/YY)'),
                         validator: (val) {
                           if (val == null || val.trim().isEmpty) return 'Required';
                           final parts = val.split('/');
                           if (parts.length != 2 || parts[0].length != 2 || parts[1].length != 2) {
-                            return 'Invalid';
+                            return 'Invalid format';
                           }
                           final month = int.tryParse(parts[0]) ?? 0;
                           final year = int.tryParse(parts[1]) ?? 0;
-                          if (month < 1 || month > 12) return 'Invalid Month';
-                          
-                          // Check if expired
+                          if (month < 1 || month > 12) return 'Invalid month';
                           final now = DateTime.now();
-                          final currentYearShort = now.year % 100;
-                          final currentMonth = now.month;
-                          if (year < currentYearShort || (year == currentYearShort && month < currentMonth)) {
-                            return 'Expired';
+                          final shortYear = now.year % 100;
+                          if (year < shortYear || (year == shortYear && month < now.month)) {
+                            return 'Card expired';
                           }
                           return null;
                         },
                       ),
                     ),
                     const SizedBox(width: 16),
-                    // CVV Input
                     Expanded(
                       flex: 2,
                       child: TextFormField(
@@ -317,10 +288,11 @@ class _CardPaymentScreenState extends State<CardPaymentScreen> {
                           LengthLimitingTextInputFormatter(4),
                         ],
                         style: const TextStyle(color: Colors.white),
-                        decoration: _inputDecoration('CVV / CVN'),
+                        decoration: _inputDecoration(_cardBrand == 'AMEX' ? 'CVV/CVN (4 digits)' : 'CVV (3 digits)'),
                         validator: (val) {
                           if (val == null || val.trim().isEmpty) return 'Required';
-                          if (val.length < 3 || val.length > 4) return 'Invalid';
+                          final minLen = _cardBrand == 'AMEX' ? 4 : 3;
+                          if (val.length < minLen) return 'Invalid';
                           return null;
                         },
                       ),
@@ -328,18 +300,15 @@ class _CardPaymentScreenState extends State<CardPaymentScreen> {
                   ],
                 ),
                 const SizedBox(height: 18),
-
-                // Cardholder Name
                 TextFormField(
                   controller: _nameController,
                   textCapitalization: TextCapitalization.words,
                   style: const TextStyle(color: Colors.white),
                   decoration: _inputDecoration('Cardholder Full Name'),
-                  validator: (val) => val == null || val.trim().isEmpty ? 'Please enter cardholder name' : null,
+                  validator: (val) =>
+                      val == null || val.trim().isEmpty ? 'Please enter name' : null,
                 ),
                 const SizedBox(height: 18),
-
-                // Email
                 TextFormField(
                   controller: _emailController,
                   keyboardType: TextInputType.emailAddress,
@@ -347,32 +316,23 @@ class _CardPaymentScreenState extends State<CardPaymentScreen> {
                   decoration: _inputDecoration('Email Address'),
                   validator: (val) {
                     if (val == null || val.trim().isEmpty) return 'Please enter email';
-                    final emailRegex = RegExp(r'^[^@]+@[^@]+\.[^@]+');
-                    if (!emailRegex.hasMatch(val.trim())) return 'Invalid email format';
+                    if (!RegExp(r'^[^@]+@[^@]+\.[^@]+').hasMatch(val)) return 'Invalid email';
                     return null;
                   },
                 ),
                 const SizedBox(height: 18),
-
-                // Phone Number
                 TextFormField(
                   controller: _phoneController,
                   keyboardType: TextInputType.phone,
                   style: const TextStyle(color: Colors.white),
-                  decoration: _inputDecoration('Phone Number'),
+                  decoration: _inputDecoration('Phone Number (e.g. +62812...)'),
                   validator: (val) {
-                    if (val == null || val.trim().isEmpty) return 'Please enter phone number';
-                    final cleanPhone = val.trim();
-                    if (!cleanPhone.startsWith('+') && !cleanPhone.startsWith('0')) {
-                      return 'Must start with + or 0';
-                    }
-                    if (cleanPhone.length < 10) return 'Must be at least 10 digits';
+                    if (val == null || val.trim().isEmpty) return 'Please enter phone';
+                    if (val.trim().length < 10) return 'Too short';
                     return null;
                   },
                 ),
                 const SizedBox(height: 32),
-
-                // Submit Button
                 ElevatedButton(
                   onPressed: _isProcessing ? null : _executePayment,
                   style: ElevatedButton.styleFrom(
@@ -387,14 +347,11 @@ class _CardPaymentScreenState extends State<CardPaymentScreen> {
                           height: 20,
                           width: 20,
                           child: CircularProgressIndicator(
-                            strokeWidth: 2,
-                            valueColor: AlwaysStoppedAnimation(Colors.white),
-                          ),
+                              strokeWidth: 2, valueColor: AlwaysStoppedAnimation(Colors.white)),
                         )
-                      : Text(
-                          'Pay ${_formatCurrency(widget.amount)}',
-                          style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 15),
-                        ),
+                      : Text('Pay ${_formatCurrency(widget.amount)}',
+                          style:
+                              const TextStyle(fontWeight: FontWeight.bold, fontSize: 15)),
                 ),
                 const SizedBox(height: 16),
                 const Row(
@@ -402,10 +359,8 @@ class _CardPaymentScreenState extends State<CardPaymentScreen> {
                   children: [
                     Icon(Icons.lock, size: 14, color: Colors.grey),
                     SizedBox(width: 6),
-                    Text(
-                      'Secured client-side via Xendit',
-                      style: TextStyle(color: Colors.grey, fontSize: 12),
-                    ),
+                    Text('Secured via Xendit v3 Payments API',
+                        style: TextStyle(color: Colors.grey, fontSize: 12)),
                   ],
                 ),
               ],
@@ -417,9 +372,11 @@ class _CardPaymentScreenState extends State<CardPaymentScreen> {
   }
 
   Widget _buildLiveCardPreview() {
-    final nameText = _nameController.text.isEmpty ? 'CARDHOLDER NAME' : _nameController.text.toUpperCase();
+    final nameText =
+        _nameController.text.isEmpty ? 'CARDHOLDER NAME' : _nameController.text.toUpperCase();
     final expiryText = _expiryController.text.isEmpty ? 'MM/YY' : _expiryController.text;
-    final cardNoText = _cardNumberController.text.isEmpty ? '•••• •••• •••• ••••' : _cardNumberController.text;
+    final cardNoText =
+        _cardNumberController.text.isEmpty ? '•••• •••• •••• ••••' : _cardNumberController.text;
 
     return Container(
       height: 190,
@@ -446,40 +403,26 @@ class _CardPaymentScreenState extends State<CardPaymentScreen> {
           Row(
             mainAxisAlignment: MainAxisAlignment.spaceBetween,
             children: [
-              const Text(
-                'CREDIT CARD',
-                style: TextStyle(
-                  color: Colors.white60,
-                  fontSize: 12,
-                  fontWeight: FontWeight.bold,
-                  letterSpacing: 2,
-                ),
-              ),
+              const Text('CREDIT CARD',
+                  style: TextStyle(
+                      color: Colors.white60,
+                      fontSize: 12,
+                      fontWeight: FontWeight.bold,
+                      letterSpacing: 2)),
               if (_cardBrand.isNotEmpty)
-                Text(
-                  _cardBrand,
-                  style: const TextStyle(
-                    color: Colors.white,
-                    fontSize: 18,
-                    fontWeight: FontWeight.bold,
-                    letterSpacing: 1.5,
-                  ),
-                )
+                Text(_cardBrand,
+                    style: const TextStyle(
+                        color: Colors.white,
+                        fontSize: 18,
+                        fontWeight: FontWeight.bold,
+                        letterSpacing: 1.5))
               else
                 const Icon(Icons.credit_card, color: Colors.white70),
             ],
           ),
-          const SizedBox(height: 16),
-          Text(
-            cardNoText,
-            style: const TextStyle(
-              color: Colors.white,
-              fontSize: 21,
-              fontWeight: FontWeight.bold,
-              letterSpacing: 2.5,
-            ),
-          ),
-          const SizedBox(height: 16),
+          Text(cardNoText,
+              style: const TextStyle(
+                  color: Colors.white, fontSize: 21, fontWeight: FontWeight.bold, letterSpacing: 2.5)),
           Row(
             mainAxisAlignment: MainAxisAlignment.spaceBetween,
             children: [
@@ -487,40 +430,26 @@ class _CardPaymentScreenState extends State<CardPaymentScreen> {
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    const Text(
-                      'CARDHOLDER',
-                      style: TextStyle(color: Colors.white54, fontSize: 9, letterSpacing: 1.2),
-                    ),
+                    const Text('CARDHOLDER',
+                        style: TextStyle(color: Colors.white54, fontSize: 9, letterSpacing: 1.2)),
                     const SizedBox(height: 4),
-                    Text(
-                      nameText,
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                      style: const TextStyle(
-                        color: Colors.white,
-                        fontSize: 14,
-                        fontWeight: FontWeight.bold,
-                      ),
-                    ),
+                    Text(nameText,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: const TextStyle(
+                            color: Colors.white, fontSize: 14, fontWeight: FontWeight.bold)),
                   ],
                 ),
               ),
               Column(
                 crossAxisAlignment: CrossAxisAlignment.end,
                 children: [
-                  const Text(
-                    'EXPIRES',
-                    style: TextStyle(color: Colors.white54, fontSize: 9, letterSpacing: 1.2),
-                  ),
+                  const Text('EXPIRES',
+                      style: TextStyle(color: Colors.white54, fontSize: 9, letterSpacing: 1.2)),
                   const SizedBox(height: 4),
-                  Text(
-                    expiryText,
-                    style: const TextStyle(
-                      color: Colors.white,
-                      fontSize: 14,
-                      fontWeight: FontWeight.bold,
-                    ),
-                  ),
+                  Text(expiryText,
+                      style: const TextStyle(
+                          color: Colors.white, fontSize: 14, fontWeight: FontWeight.bold)),
                 ],
               ),
             ],
@@ -530,20 +459,15 @@ class _CardPaymentScreenState extends State<CardPaymentScreen> {
     );
   }
 
-  Widget? _buildCardBrandIcon() {
+  Widget? _buildBrandIcon() {
     if (_cardBrand.isEmpty) return null;
     return Container(
       padding: const EdgeInsets.only(right: 12),
       alignment: Alignment.centerRight,
-      width: 60,
-      child: Text(
-        _cardBrand,
-        style: const TextStyle(
-          color: Color(0xFF6366F1),
-          fontWeight: FontWeight.bold,
-          fontSize: 11,
-        ),
-      ),
+      width: 80,
+      child: Text(_cardBrand,
+          style: const TextStyle(
+              color: Color(0xFF6366F1), fontWeight: FontWeight.bold, fontSize: 11)),
     );
   }
 
@@ -574,54 +498,32 @@ class _CardPaymentScreenState extends State<CardPaymentScreen> {
   }
 }
 
-class CardNumberInputFormatter extends TextInputFormatter {
+class _CardNumberFormatter extends TextInputFormatter {
   @override
-  TextEditingValue formatEditUpdate(
-    TextEditingValue oldValue,
-    TextEditingValue newValue,
-  ) {
-    var text = newValue.text;
-    if (newValue.selection.baseOffset == 0) {
-      return newValue;
-    }
-    var buffer = StringBuffer();
+  TextEditingValue formatEditUpdate(TextEditingValue old, TextEditingValue newVal) {
+    final text = newVal.text;
+    if (newVal.selection.baseOffset == 0) return newVal;
+    final buffer = StringBuffer();
     for (int i = 0; i < text.length; i++) {
       buffer.write(text[i]);
-      var nonZeroIndex = i + 1;
-      if (nonZeroIndex % 4 == 0 && nonZeroIndex != text.length) {
-        buffer.write(' ');
-      }
+      if ((i + 1) % 4 == 0 && i + 1 != text.length) buffer.write(' ');
     }
-    var string = buffer.toString();
-    return newValue.copyWith(
-      text: string,
-      selection: TextSelection.collapsed(offset: string.length),
-    );
+    final result = buffer.toString();
+    return newVal.copyWith(text: result, selection: TextSelection.collapsed(offset: result.length));
   }
 }
 
-class CardMonthInputFormatter extends TextInputFormatter {
+class _ExpiryFormatter extends TextInputFormatter {
   @override
-  TextEditingValue formatEditUpdate(
-    TextEditingValue oldValue,
-    TextEditingValue newValue,
-  ) {
-    var newText = newValue.text;
-    if (newValue.selection.baseOffset == 0) {
-      return newValue;
+  TextEditingValue formatEditUpdate(TextEditingValue old, TextEditingValue newVal) {
+    final text = newVal.text;
+    if (newVal.selection.baseOffset == 0) return newVal;
+    final buffer = StringBuffer();
+    for (int i = 0; i < text.length; i++) {
+      buffer.write(text[i]);
+      if (i + 1 == 2 && i + 1 != text.length) buffer.write('/');
     }
-    var buffer = StringBuffer();
-    for (int i = 0; i < newText.length; i++) {
-      buffer.write(newText[i]);
-      var nonZeroIndex = i + 1;
-      if (nonZeroIndex == 2 && nonZeroIndex != newText.length) {
-        buffer.write('/');
-      }
-    }
-    var string = buffer.toString();
-    return newValue.copyWith(
-      text: string,
-      selection: TextSelection.collapsed(offset: string.length),
-    );
+    final result = buffer.toString();
+    return newVal.copyWith(text: result, selection: TextSelection.collapsed(offset: result.length));
   }
 }

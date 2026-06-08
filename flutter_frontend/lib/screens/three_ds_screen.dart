@@ -24,9 +24,10 @@ class ThreeDSScreen extends StatelessWidget {
             onLoadStop: (controller, url) {
               if (url != null) {
                 final urlStr = url.toString();
-                if (urlStr.contains('/payment/success') ||
-                    urlStr.contains('/payment/failure')) {
-                  Navigator.pop(context);
+                if (urlStr.contains('/payment/success')) {
+                  Navigator.pop(context, true);
+                } else if (urlStr.contains('/payment/failure')) {
+                  Navigator.pop(context, false);
                 }
               }
             },

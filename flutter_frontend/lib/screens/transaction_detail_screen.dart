@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import '../providers/payment_provider.dart';
 import '../widgets/payment_detail_widget.dart';
+import '../services/payout_storage_service.dart';
 
 class TransactionDetailScreen extends StatefulWidget {
   final int transactionId;
@@ -103,7 +104,7 @@ class _TransactionDetailScreenState extends State<TransactionDetailScreen> {
     );
   }
 
-  void _openPayoutSelectionBottomSheet(List<dynamic> methods) {
+  void _openPayoutSelectionBottomSheet(List<PayoutMethod> methods) {
     showModalBottomSheet(
       context: context,
       backgroundColor: const Color(0xFF161925),
@@ -113,16 +114,16 @@ class _TransactionDetailScreenState extends State<TransactionDetailScreen> {
       builder: (context) {
         return StatefulBuilder(
           builder: (context, setSheetState) {
-            int? selectedId;
+            String? selectedId;
             // Find default primary method
             for (var m in methods) {
-              if (m['is_primary'] == true) {
-                selectedId = m['id'];
+              if (m.isPrimary == true) {
+                selectedId = m.id;
                 break;
               }
             }
             if (selectedId == null && methods.isNotEmpty) {
-              selectedId = methods.first['id'];
+              selectedId = methods.first.id;
             }
 
             return Padding(
@@ -149,13 +150,13 @@ class _TransactionDetailScreenState extends State<TransactionDetailScreen> {
                       itemCount: methods.length,
                       itemBuilder: (context, index) {
                         final m = methods[index];
-                        final int id = m['id'];
-                        final String label = m['label'] ?? '';
-                        final String masked = m['masked_account'] ?? '';
-                        final String code = m['channel_code'] ?? '';
-                        final bool isPrimary = m['is_primary'] ?? false;
+                        final String id = m.id;
+                        final String label = m.label;
+                        final String masked = m.maskedAccount;
+                        final String code = m.channelCode;
+                        final bool isPrimary = m.isPrimary;
 
-                        return RadioListTile<int>(
+                        return RadioListTile<String>(
                           value: id,
                           groupValue: selectedId,
                           activeColor: const Color(0xFF6366F1),
@@ -173,7 +174,10 @@ class _TransactionDetailScreenState extends State<TransactionDetailScreen> {
                   const SizedBox(height: 20),
 
                   ElevatedButton(
-                    onPressed: selectedId == null ? null : () => _confirmPayout(selectedId!),
+                    onPressed: selectedId == null ? null : () {
+                      final selectedMethod = methods.firstWhere((element) => element.id == selectedId);
+                      _confirmPayout(selectedMethod);
+                    },
                     style: ElevatedButton.styleFrom(
                       backgroundColor: const Color(0xFF6366F1),
                       foregroundColor: Colors.white,
@@ -191,7 +195,7 @@ class _TransactionDetailScreenState extends State<TransactionDetailScreen> {
     );
   }
 
-  void _confirmPayout(int payoutMethodId) {
+  void _confirmPayout(PayoutMethod method) {
     Navigator.pop(context); // Close bottom sheet
     
     showDialog(
@@ -213,7 +217,7 @@ class _TransactionDetailScreenState extends State<TransactionDetailScreen> {
             child: const Text('Confirm', style: TextStyle(color: Colors.white)),
             onPressed: () {
               Navigator.pop(context); // Close confirm dialog
-              _executePayout(payoutMethodId);
+              _executePayout(method);
             },
           )
         ],
@@ -221,11 +225,11 @@ class _TransactionDetailScreenState extends State<TransactionDetailScreen> {
     );
   }
 
-  void _executePayout(int payoutMethodId) {
+  void _executePayout(PayoutMethod method) {
     setState(() => _isLocalLoading = true);
     final provider = context.read<PaymentProvider>();
 
-    provider.acceptTransaction(widget.transactionId, payoutMethodId).then((result) {
+    provider.acceptTransaction(widget.transactionId, method).then((result) {
       if (mounted) {
         setState(() {
           _isLocalLoading = false;
@@ -472,15 +476,64 @@ class _TransactionDetailScreenState extends State<TransactionDetailScreen> {
       );
     }
 
+    if (status == 'FAILED') {
+      final details = _transaction?['payment_details'] is Map 
+          ? Map<String, dynamic>.from(_transaction!['payment_details']) 
+          : {};
+      final failureCode = details['failure_code'] ?? 'DECLINED';
+      final failureReason = details['failure_reason'] ?? 'Payment was declined by the card issuer.';
+      return Container(
+        padding: const EdgeInsets.symmetric(vertical: 12, horizontal: 16),
+        decoration: BoxDecoration(
+          color: const Color(0xFFF87171).withAlpha(38),
+          borderRadius: BorderRadius.circular(12),
+          border: Border.all(color: const Color(0xFFF87171).withAlpha(76)),
+        ),
+        child: Row(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            const Icon(Icons.error_outline, color: Color(0xFFF87171)),
+            const SizedBox(width: 10),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    'Payment Failed ($failureCode)',
+                    style: const TextStyle(color: Color(0xFFF87171), fontWeight: FontWeight.bold, fontSize: 14),
+                  ),
+                  const SizedBox(height: 4),
+                  Text(
+                    failureReason,
+                    style: const TextStyle(color: Colors.white70, fontSize: 12),
+                  ),
+                ],
+              ),
+            ),
+          ],
+        ),
+      );
+    }
+
     return const SizedBox.shrink();
   }
 
   Widget _buildDisbursementCard(Map<String, dynamic> tx) {
     final payoutMethod = tx['payout_method'];
+    final payoutDetails = tx['payment_details']?['payout'];
     final String disbId = tx['disbursement_external_id'] ?? 'N/A';
-    final String label = payoutMethod != null ? payoutMethod['label'] ?? '' : 'Saved Payout Account';
-    final String code = payoutMethod != null ? payoutMethod['channel_code'] ?? '' : '';
-    final String masked = payoutMethod != null ? payoutMethod['masked_account'] ?? '' : '';
+    
+    final String label = payoutMethod != null 
+        ? payoutMethod['label'] ?? '' 
+        : (payoutDetails != null ? payoutDetails['account_holder_name'] ?? '' : 'Saved Payout Account');
+        
+    final String code = payoutMethod != null 
+        ? payoutMethod['channel_code'] ?? '' 
+        : (payoutDetails != null ? payoutDetails['channel_code'] ?? '' : '');
+        
+    final String masked = payoutMethod != null 
+        ? payoutMethod['masked_account'] ?? '' 
+        : (payoutDetails != null ? payoutDetails['masked_account'] ?? '' : '');
 
     return Container(
       decoration: BoxDecoration(

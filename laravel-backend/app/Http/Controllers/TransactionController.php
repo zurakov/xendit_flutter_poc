@@ -3,7 +3,6 @@
 namespace App\Http\Controllers;
 
 use App\Models\Transaction;
-use App\Models\PayoutMethod;
 use App\Services\XenditService;
 use Illuminate\Http\Request;
 use Illuminate\Support\Str;
@@ -23,7 +22,7 @@ class TransactionController extends Controller
      */
     public function index()
     {
-        $transactions = Transaction::with('payoutMethod')->orderBy('created_at', 'desc')->get();
+        $transactions = Transaction::orderBy('created_at', 'desc')->get();
         return response()->json([
             'success' => true,
             'data' => $transactions
@@ -35,7 +34,7 @@ class TransactionController extends Controller
      */
     public function show($id)
     {
-        $transaction = Transaction::with('payoutMethod')->find($id);
+        $transaction = Transaction::find($id);
 
         if (!$transaction) {
             return response()->json([
@@ -45,13 +44,13 @@ class TransactionController extends Controller
         }
 
         // Auto-complete mock disbursements after 3 seconds for seamless demo
-        if ($transaction->status === 'ACCEPTED' && str_starts_with($transaction->disbursement_external_id ?? '', 'mock-disb-')) {
+        if ($transaction->status === 'ACCEPTED' && (str_starts_with($transaction->disbursement_external_id ?? '', 'mock-') || str_starts_with($transaction->disbursement_external_id ?? '', 'payout-'))) {
             $secondsSinceUpdate = now()->diffInSeconds($transaction->updated_at);
             if ($secondsSinceUpdate >= 3) {
                 $transaction->update([
                     'status' => 'DISBURSED'
                 ]);
-                Log::info("Mock disbursement {$transaction->disbursement_external_id} auto-completed to DISBURSED.");
+                Log::info("Mock payout {$transaction->disbursement_external_id} auto-completed to DISBURSED.");
                 
                 // Refresh model
                 $transaction->refresh();
@@ -72,9 +71,8 @@ class TransactionController extends Controller
         $request->validate([
             'amount' => 'required|numeric|min:1',
             'description' => 'nullable|string|max:255',
-            'payment_method_type' => 'required|string|in:VA,QRIS,EWALLET,RETAIL,CARD',
+            'payment_method_type' => 'required|string|in:VA,QRIS,EWALLET,RETAIL',
             'payment_channel' => 'required|string',
-            'payment_token_id' => 'required_if:payment_method_type,CARD|string',
         ]);
 
         $uuid = Str::uuid()->toString();
@@ -85,31 +83,18 @@ class TransactionController extends Controller
         $channel = $request->payment_channel;
 
         try {
-            if ($type === 'CARD') {
-                $xenditResponse = $this->xendit->createCardPayment(
-                    paymentTokenId: $request->payment_token_id,
-                    amount:         (int) $amount,
-                    referenceId:    $externalId,
-                );
-            } else {
-                $xenditResponse = $this->xendit->createPaymentRequest(
-                    referenceId:       $externalId,
-                    amount:            (int) $amount,
-                    channelCode:       $channel,
-                    paymentMethodType: $type,
-                );
-            }
+            $xenditResponse = $this->xendit->createPaymentRequest(
+                referenceId:       $externalId,
+                amount:            (int) $amount,
+                channelCode:       $channel,
+                paymentMethodType: $type,
+            );
 
             $xenditId = $xenditResponse['id'] ?? $xenditResponse['payment_request_id'] ?? null;
             $paymentDetails = $this->extractPaymentDetails($xenditResponse, $type);
 
-            // Check if payment request succeeded/completed immediately (e.g. for Cards)
             $status = 'PENDING';
             $paidAt = null;
-            if (isset($xenditResponse['status']) && in_array(strtoupper($xenditResponse['status']), ['SUCCEEDED', 'COMPLETED'])) {
-                $status = 'PAID';
-                $paidAt = now();
-            }
 
             // Save transaction in database
             $transaction = Transaction::create([
@@ -142,14 +127,6 @@ class TransactionController extends Controller
             $errMessage = $e->getMessage();
             Log::error("Transaction creation failed: " . $errMessage);
 
-            if (str_contains($errMessage, 'TOKEN_NOT_ACTIVE')) {
-                return response()->json([
-                    'success' => false,
-                    'error' => 'TOKEN_NOT_ACTIVE',
-                    'message' => 'Card tokenization is still processing. Please try again in a moment.'
-                ], 422);
-            }
-
             if (str_contains($errMessage, 'CHANNEL_NOT_ACTIVATED')) {
                 return response()->json([
                     'success' => false,
@@ -166,12 +143,15 @@ class TransactionController extends Controller
     }
 
     /**
-     * Accept a PAID transaction and trigger disbursement.
+     * Accept a PAID transaction and trigger payout.
      */
     public function accept($id, Request $request)
     {
         $request->validate([
-            'payout_method_id' => 'required|exists:payout_methods,id'
+            'channel_code' => 'required|string',
+            'channel_type' => 'required|string',
+            'account_number' => 'required|string',
+            'account_holder_name' => 'required|string',
         ]);
 
         $transaction = Transaction::find($id);
@@ -190,43 +170,44 @@ class TransactionController extends Controller
             ], 400);
         }
 
-        $payoutMethod = PayoutMethod::find($request->payout_method_id);
-
         try {
-            // Decrypt immediately before making the API request
-            $decryptedAccountNumber = $payoutMethod->getDecryptedAccountNumber();
-            $decryptedHolderName = $payoutMethod->getDecryptedHolderName();
+            $channelCode = $request->channel_code;
+            $accountNumber = $request->account_number;
+            $accountHolderName = $request->account_holder_name;
 
-            // Default holder name for e-wallets if empty
-            if (empty($decryptedHolderName)) {
-                $decryptedHolderName = $payoutMethod->label ?: 'POC User';
-            }
-
-            // Create disbursement external_id
+            // Create payout reference_id
             $timestamp = time();
-            $disbExternalId = "disbursement-{$transaction->id}-{$timestamp}";
+            $payoutRefId = "payout-{$transaction->id}-{$timestamp}";
 
-            // Trigger disbursement
+            // Trigger payout
             try {
-                $result = $this->xendit->createDisbursement(
-                    $disbExternalId,
-                    $payoutMethod->channel_code,
-                    $decryptedHolderName,
-                    $decryptedAccountNumber,
+                $result = $this->xendit->createPayout(
+                    $payoutRefId,
+                    $channelCode,
+                    $accountHolderName,
+                    $accountNumber,
                     $transaction->amount,
                     "Payout for transaction {$transaction->external_id}"
                 );
             } catch (\Exception $e) {
                 $errMessage = $e->getMessage();
-                // If API Key is forbidden (REQUEST_FORBIDDEN_ERROR), fallback to a local mock sandbox disbursement
+                // If API Key is forbidden (REQUEST_FORBIDDEN_ERROR), fallback to a local mock sandbox payout
                 if (str_contains($errMessage, 'forbidden') || str_contains($errMessage, 'REQUEST_FORBIDDEN_ERROR') || str_contains($errMessage, 'permissions')) {
-                    Log::warning("Xendit disbursement API returned forbidden (permissions). Falling back to mock sandbox payout.");
+                    Log::warning("Xendit payout API returned forbidden (permissions). Falling back to mock sandbox payout.");
                     
-                    $mockDisbId = "mock-disb-{$transaction->id}-{$timestamp}";
+                    $mockPayoutId = "mock-payout-{$transaction->id}-{$timestamp}";
+                    $paymentDetails = $transaction->payment_details ?? [];
+                    $paymentDetails['payout'] = [
+                        'channel_code' => $channelCode,
+                        'channel_type' => $request->channel_type,
+                        'account_holder_name' => $accountHolderName,
+                        'masked_account' => '••••' . substr($accountNumber, -4),
+                    ];
+
                     $transaction->update([
                         'status' => 'ACCEPTED',
-                        'payout_method_id' => $payoutMethod->id,
-                        'disbursement_external_id' => $mockDisbId,
+                        'disbursement_external_id' => $mockPayoutId,
+                        'payment_details' => $paymentDetails,
                     ]);
 
                     return response()->json([
@@ -234,14 +215,17 @@ class TransactionController extends Controller
                         'data' => [
                             'transaction_id' => $transaction->id,
                             'status' => $transaction->status,
-                            'message' => 'API Key lacks Disbursements permission. Activated local sandbox simulation fallback.',
+                            'message' => 'API Key lacks Payouts permission. Activated local sandbox simulation fallback.',
                             'disbursement' => [
-                                'id' => 'mock_disb_' . Str::random(10),
-                                'external_id' => $mockDisbId,
+                                'id' => 'mock_po_' . Str::random(10),
+                                'reference_id' => $mockPayoutId,
                                 'amount' => (int) $transaction->amount,
                                 'status' => 'PENDING',
-                                'bank_code' => $payoutMethod->channel_code,
-                                'account_holder_name' => $decryptedHolderName,
+                                'channel_code' => $channelCode,
+                                'channel_properties' => [
+                                    'account_number' => $accountNumber,
+                                    'account_holder_name' => $accountHolderName,
+                                ],
                                 'description' => "Mock Payout (API key lacks permissions)",
                             ]
                         ]
@@ -251,11 +235,20 @@ class TransactionController extends Controller
                 }
             }
 
+            // Save payout details in transaction payment_details
+            $paymentDetails = $transaction->payment_details ?? [];
+            $paymentDetails['payout'] = [
+                'channel_code' => $channelCode,
+                'channel_type' => $request->channel_type,
+                'account_holder_name' => $accountHolderName,
+                'masked_account' => '••••' . substr($accountNumber, -4),
+            ];
+
             // Update transaction state
             $transaction->update([
                 'status' => 'ACCEPTED',
-                'payout_method_id' => $payoutMethod->id,
-                'disbursement_external_id' => $disbExternalId,
+                'disbursement_external_id' => $payoutRefId,
+                'payment_details' => $paymentDetails,
             ]);
 
             return response()->json([

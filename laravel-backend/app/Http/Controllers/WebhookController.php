@@ -80,18 +80,24 @@ class WebhookController extends Controller
             return response()->json(['success' => false, 'error' => 'Invalid webhook token'], 401);
         }
 
-        $externalId = $request->input('external_id');
-        $status = strtoupper($request->input('status', ''));
+        $payload = $request->all();
+        $referenceId = $payload['reference_id'] ?? $payload['data']['reference_id'] ?? $payload['external_id'] ?? $payload['data']['external_id'] ?? null;
+        $status = strtoupper($payload['status'] ?? $payload['data']['status'] ?? '');
 
-        $transaction = Transaction::where('disbursement_external_id', $externalId)->first();
+        if (!$referenceId) {
+            Log::warning("Disbursement webhook payload missing identifier.");
+            return response()->json(['success' => false, 'error' => 'Missing payout identifier'], 400);
+        }
+
+        $transaction = Transaction::where('disbursement_external_id', $referenceId)->first();
 
         if (!$transaction) {
-            Log::warning("Transaction not found for Disbursement: disb_ext_id={$externalId}");
+            Log::warning("Transaction not found for Payout: ref_id={$referenceId}");
             return response()->json(['success' => false, 'error' => 'Transaction not found'], 200);
         }
 
         if ($transaction->status === 'ACCEPTED') {
-            if ($status === 'COMPLETED') {
+            if (in_array($status, ['COMPLETED', 'SUCCEEDED'])) {
                 $transaction->update(['status' => 'DISBURSED']);
                 Log::info("Transaction {$transaction->id} marked as DISBURSED via webhook.");
             } elseif ($status === 'FAILED') {
